@@ -1155,13 +1155,24 @@ struct PasteableTextField: NSViewRepresentable {
 struct ColoredProgressBar: View {
     var value: Double  // 0.0 to 1.0
     var tintColor: Color
+    var targetValue: Double? = nil  // Optional target indicator (0.0 to 1.0)
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
+                // Background
                 RoundedRectangle(cornerRadius: 3)
                     .fill(Color.secondary.opacity(0.2))
                     .frame(height: 6)
+
+                // Target indicator (yellow bar)
+                if let target = targetValue, target > 0 {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.yellow.opacity(0.5))
+                        .frame(width: max(0, geometry.size.width * CGFloat(min(target, 1.0))), height: 6)
+                }
+
+                // Actual usage bar
                 RoundedRectangle(cornerRadius: 3)
                     .fill(tintColor)
                     .frame(width: max(0, geometry.size.width * CGFloat(min(value, 1.0))), height: 6)
@@ -1264,11 +1275,27 @@ struct UsageView: View {
                     }
                 }
 
-                ColoredProgressBar(value: usageManager.weeklyPercentage, tintColor: colorForPercentage(usageManager.weeklyPercentage))
+                let weeklyTarget = calculateWeeklyTarget(resetDate: usageManager.weeklyResetsAt)
+                ColoredProgressBar(value: usageManager.weeklyPercentage, tintColor: colorForPercentage(usageManager.weeklyPercentage), targetValue: weeklyTarget)
 
-                Text("\(Int(usageManager.weeklyPercentage * 100))% used")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                HStack {
+                    Text("\(Int(usageManager.weeklyPercentage * 100))% used")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Spacer()
+
+                    if weeklyTarget > 0 {
+                        let difference = (usageManager.weeklyPercentage - weeklyTarget) * 100
+                        if abs(difference) >= 0.1 {
+                            let status = difference > 0 ? "Ahead of Target" : "Behind Target"
+                            let color: Color = difference > 0 ? .orange : .green
+                            Text("\(String(format: "%.1f", abs(difference)))% \(status)")
+                                .font(.caption)
+                                .foregroundColor(color)
+                        }
+                    }
+                }
             }
 
             // Weekly Sonnet Usage (only show if available)
@@ -1285,11 +1312,27 @@ struct UsageView: View {
                         }
                     }
 
-                    ColoredProgressBar(value: usageManager.weeklySonnetPercentage, tintColor: colorForPercentage(usageManager.weeklySonnetPercentage))
+                    let sonnetTarget = calculateWeeklyTarget(resetDate: usageManager.weeklySonnetResetsAt)
+                    ColoredProgressBar(value: usageManager.weeklySonnetPercentage, tintColor: colorForPercentage(usageManager.weeklySonnetPercentage), targetValue: sonnetTarget)
 
-                    Text("\(Int(usageManager.weeklySonnetPercentage * 100))% used")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    HStack {
+                        Text("\(Int(usageManager.weeklySonnetPercentage * 100))% used")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        Spacer()
+
+                        if sonnetTarget > 0 {
+                            let difference = (usageManager.weeklySonnetPercentage - sonnetTarget) * 100
+                            if abs(difference) >= 0.1 {
+                                let status = difference > 0 ? "Ahead of Target" : "Behind Target"
+                                let color: Color = difference > 0 ? .orange : .green
+                                Text("\(String(format: "%.1f", abs(difference)))% \(status)")
+                                    .font(.caption)
+                                    .foregroundColor(color)
+                            }
+                        }
+                    }
                 }
             }
             }
@@ -1327,11 +1370,27 @@ struct UsageView: View {
                     }
                 }
 
-                ColoredProgressBar(value: usageManager.codexWeeklyPercentage, tintColor: colorForPercentage(usageManager.codexWeeklyPercentage))
+                let codexWeeklyTarget = calculateWeeklyTarget(resetDate: usageManager.codexWeeklyResetsAt)
+                ColoredProgressBar(value: usageManager.codexWeeklyPercentage, tintColor: colorForPercentage(usageManager.codexWeeklyPercentage), targetValue: codexWeeklyTarget)
 
-                Text("\(Int(usageManager.codexWeeklyPercentage * 100))% used")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                HStack {
+                    Text("\(Int(usageManager.codexWeeklyPercentage * 100))% used")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Spacer()
+
+                    if codexWeeklyTarget > 0 {
+                        let difference = (usageManager.codexWeeklyPercentage - codexWeeklyTarget) * 100
+                        if abs(difference) >= 0.1 {
+                            let status = difference > 0 ? "Ahead of Target" : "Behind Target"
+                            let color: Color = difference > 0 ? .orange : .green
+                            Text("\(String(format: "%.1f", abs(difference)))% \(status)")
+                                .font(.caption)
+                                .foregroundColor(color)
+                        }
+                    }
+                }
             }
             }
 
@@ -1714,6 +1773,26 @@ struct UsageView: View {
         } else {
             return .red
         }
+    }
+
+    // Calculate target usage based on days elapsed in the weekly cycle
+    func calculateWeeklyTarget(resetDate: Date?) -> Double {
+        guard let resetDate = resetDate else { return 0.0 }
+
+        let now = Date()
+        let weekDuration: TimeInterval = 7 * 24 * 60 * 60 // 7 days in seconds
+
+        // Calculate when the period started (7 days before reset)
+        let periodStart = resetDate.addingTimeInterval(-weekDuration)
+
+        // Calculate days elapsed since period start
+        let elapsed = now.timeIntervalSince(periodStart)
+        let daysElapsed = elapsed / (24 * 60 * 60)
+
+        // Target is proportional to days elapsed (capped at 100%)
+        let target = min(daysElapsed / 7.0, 1.0)
+
+        return target
     }
 
 }
