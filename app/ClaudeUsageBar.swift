@@ -201,7 +201,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 })
             })
             let hostingController = NSHostingController(rootView: usageView)
-            let initialHeight: CGFloat = 280 // Start with collapsed height
+            let initialHeight: CGFloat = 310 // Start with collapsed height
             hostingController.view.setFrameSize(NSSize(width: 360, height: initialHeight))
             popover.contentViewController = hostingController
 
@@ -430,6 +430,12 @@ enum DisplayType: String, CaseIterable {
     case both = "Both"
 }
 
+// Menu bar usage type enum
+enum MenuBarUsageType: String, CaseIterable {
+    case fiveHour = "5-Hour Limit"
+    case weekly = "Weekly Limit"
+}
+
 // Main entry point
 @main
 struct Main {
@@ -476,6 +482,7 @@ class UsageManager: ObservableObject {
     @Published var hasFetchedCodexData: Bool = false
     @Published var isAccessibilityEnabled: Bool = false
     @Published var shortcutEnabled: Bool = true
+    @Published var menuBarBasedOn: MenuBarUsageType = .fiveHour
 
     private var statusItem: NSStatusItem?
     private var sessionCookie: String = ""
@@ -532,6 +539,11 @@ class UsageManager: ObservableObject {
            let display = DisplayType(rawValue: savedDisplay) {
             displayedService = display
         }
+        // Load menu bar usage type preference
+        if let savedMenuBarType = UserDefaults.standard.string(forKey: "menu_bar_usage_type"),
+           let menuBarType = MenuBarUsageType(rawValue: savedMenuBarType) {
+            menuBarBasedOn = menuBarType
+        }
     }
 
     func saveSettings() {
@@ -539,6 +551,7 @@ class UsageManager: ObservableObject {
         UserDefaults.standard.set(openAtLogin, forKey: "open_at_login")
         UserDefaults.standard.set(shortcutEnabled, forKey: "shortcut_enabled")
         UserDefaults.standard.set(displayedService.rawValue, forKey: "displayed_service")
+        UserDefaults.standard.set(menuBarBasedOn.rawValue, forKey: "menu_bar_usage_type")
         UserDefaults.standard.synchronize()
     }
 
@@ -925,9 +938,18 @@ class UsageManager: ObservableObject {
     }
 
     func updateStatusBar() {
-        // Calculate percentages for both services
-        let claudePercentage = Int((Double(sessionUsage) / Double(sessionLimit)) * 100)
-        let codexPercentage = codexFiveHourUsage
+        // Calculate percentages based on user preference
+        let claudePercentage: Int
+        let codexPercentage: Int
+
+        switch menuBarBasedOn {
+        case .fiveHour:
+            claudePercentage = Int((Double(sessionUsage) / Double(sessionLimit)) * 100)
+            codexPercentage = codexFiveHourUsage
+        case .weekly:
+            claudePercentage = weeklyUsage
+            codexPercentage = codexWeeklyUsage
+        }
 
         // Show the percentage for the displayed service
         switch displayedService {
@@ -939,9 +961,10 @@ class UsageManager: ObservableObject {
             delegate?.updateStatusIcon(percentage: claudePercentage, displayType: .both, codexPercentage: codexPercentage)
         }
 
-        // Check for notification thresholds (only for Claude)
+        // Check for notification thresholds (only for Claude, always based on 5-hour)
         if displayedService == .claude || displayedService == .both {
-            checkNotificationThresholds(percentage: claudePercentage)
+            let sessionPercentageFor5Hour = Int((Double(sessionUsage) / Double(sessionLimit)) * 100)
+            checkNotificationThresholds(percentage: sessionPercentageFor5Hour)
         }
     }
 
@@ -1193,11 +1216,11 @@ struct UsageView: View {
     var onHeightChange: ((CGFloat) -> Void)?
 
     var calculatedHeight: CGFloat {
-        var height: CGFloat = 280 // Base height for header, usage bars, buttons
+        var height: CGFloat = 310 // Base height for header, usage bars, buttons
         if showingCookieInput { height += 260 }
         if showingCodexInput { height += 300 }
-        if showingSettings { height += 250 }
-        return min(height, 600) // Cap at 600 to prevent going off screen
+        if showingSettings { height += 280 }
+        return min(height, 650) // Cap at 650 to prevent going off screen
     }
 
     func updatePopoverHeight() {
@@ -1608,6 +1631,28 @@ struct UsageView: View {
                         }
                         .pickerStyle(.radioGroup)
                         Text("Choose which service's usage to display in the menu bar")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Menu Bar Based On")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Picker("Base percentage on:", selection: Binding(
+                            get: { usageManager.menuBarBasedOn },
+                            set: { newValue in
+                                usageManager.menuBarBasedOn = newValue
+                                usageManager.saveSettings()
+                                usageManager.updateStatusBar()
+                            }
+                        )) {
+                            ForEach(MenuBarUsageType.allCases, id: \.self) { type in
+                                Text(type.rawValue).tag(type)
+                            }
+                        }
+                        .pickerStyle(.radioGroup)
+                        Text("Choose whether menu bar percentage/color is based on 5-hour or weekly limit")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
