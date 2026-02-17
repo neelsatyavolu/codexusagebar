@@ -201,11 +201,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 })
             })
             let hostingController = NSHostingController(rootView: usageView)
-            let initialHeight: CGFloat = 310 // Start with collapsed height
+
+            // Calculate initial height based on selected service and extra usage
+            var initialHeight: CGFloat = 310 // Start with base collapsed height
+
+            // Add extra height for Claude extra usage if enabled and showing
+            if usageManager.selectedService == .claude &&
+               usageManager.extraUsageEnabled &&
+               usageManager.hasExtraUsage &&
+               usageManager.hasFetchedData {
+                initialHeight += 52 // Height for extra usage bar
+            }
+
             hostingController.view.setFrameSize(NSSize(width: 360, height: initialHeight))
             popover.contentViewController = hostingController
 
-            // Ensure popover size starts at collapsed height
+            // Ensure popover size starts at calculated height
             popover.contentSize = NSSize(width: 360, height: initialHeight)
 
             // Show popover below menu bar button with arrow pointing up to the icon
@@ -483,6 +494,11 @@ class UsageManager: ObservableObject {
     @Published var isAccessibilityEnabled: Bool = false
     @Published var shortcutEnabled: Bool = true
     @Published var menuBarBasedOn: MenuBarUsageType = .fiveHour
+    @Published var extraUsageEnabled: Bool = false
+    @Published var extraUsageUsed: Double = 0.0       // dollars used (e.g. 14.71)
+    @Published var extraUsageTotal: Double = 0.0       // total credits (used + remaining)
+    @Published var extraUsagePercentage: Double = 0.0  // 0.0-1.0
+    @Published var hasExtraUsage: Bool = false
 
     private var statusItem: NSStatusItem?
     private var sessionCookie: String = ""
@@ -490,6 +506,7 @@ class UsageManager: ObservableObject {
     private var codexCookie: String = ""
     private weak var delegate: AppDelegate?
     private var lastNotifiedThreshold: Int = 0
+    private var currentOrgId: String?
 
     init(statusItem: NSStatusItem?, delegate: AppDelegate? = nil) {
         self.statusItem = statusItem
@@ -544,6 +561,7 @@ class UsageManager: ObservableObject {
            let menuBarType = MenuBarUsageType(rawValue: savedMenuBarType) {
             menuBarBasedOn = menuBarType
         }
+        extraUsageEnabled = UserDefaults.standard.bool(forKey: "extra_usage_enabled")
     }
 
     func saveSettings() {
@@ -552,6 +570,7 @@ class UsageManager: ObservableObject {
         UserDefaults.standard.set(shortcutEnabled, forKey: "shortcut_enabled")
         UserDefaults.standard.set(displayedService.rawValue, forKey: "displayed_service")
         UserDefaults.standard.set(menuBarBasedOn.rawValue, forKey: "menu_bar_usage_type")
+        UserDefaults.standard.set(extraUsageEnabled, forKey: "extra_usage_enabled")
         UserDefaults.standard.synchronize()
     }
 
@@ -588,6 +607,10 @@ class UsageManager: ObservableObject {
         weeklySonnetResetsAt = nil
         hasFetchedData = false
         hasWeeklySonnet = false
+        hasExtraUsage = false
+        extraUsageUsed = 0.0
+        extraUsageTotal = 0.0
+        extraUsagePercentage = 0.0
         errorMessage = nil
         lastNotifiedThreshold = 0
         UserDefaults.standard.set(0, forKey: "last_notified_threshold")
@@ -690,6 +713,7 @@ class UsageManager: ObservableObject {
     }
 
     func fetchUsageWithOrgId(_ orgId: String) {
+        currentOrgId = orgId
         let urlString = "https://claude.ai/api/organizations/\(orgId)/usage"
 
         guard let url = URL(string: urlString) else {
@@ -822,6 +846,11 @@ class UsageManager: ObservableObject {
 
             // Update percentage values for progress bars
             updatePercentages()
+
+            // Fetch extra usage data if enabled
+            if let orgId = currentOrgId {
+                fetchExtraUsage(orgId: orgId)
+            }
         } catch {
             NSLog("❌ Parse error: \(error.localizedDescription)")
             errorMessage = "Parse error"
@@ -934,6 +963,82 @@ class UsageManager: ObservableObject {
             updatePercentages()
         } catch {
             NSLog("❌ Codex Parse error: \(error.localizedDescription)")
+        }
+    }
+
+    func fetchExtraUsage(orgId: String) {
+        guard extraUsageEnabled else { return }
+
+        let overageURL = "https://claude.ai/api/organizations/\(orgId)/overage_spend_limit"
+        let creditsURL = "https://claude.ai/api/organizations/\(orgId)/prepaid/credits"
+
+        guard let url1 = URL(string: overageURL), let url2 = URL(string: creditsURL) else { return }
+
+        var request1 = URLRequest(url: url1)
+        request1.httpMethod = "GET"
+        request1.setValue(sessionCookie, forHTTPHeaderField: "Cookie")
+        request1.setValue("*/*", forHTTPHeaderField: "Accept")
+        request1.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request1.setValue("https://claude.ai", forHTTPHeaderField: "Referer")
+        request1.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+
+        var request2 = URLRequest(url: url2)
+        request2.httpMethod = "GET"
+        request2.setValue(sessionCookie, forHTTPHeaderField: "Cookie")
+        request2.setValue("*/*", forHTTPHeaderField: "Accept")
+        request2.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request2.setValue("https://claude.ai", forHTTPHeaderField: "Referer")
+        request2.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+
+        NSLog("📡 Fetching extra usage data...")
+
+        // Fetch both in parallel, combine results
+        let group = DispatchGroup()
+        var usedCredits: Double?
+        var remainingCredits: Double?
+
+        group.enter()
+        URLSession.shared.dataTask(with: request1) { data, response, error in
+            defer { group.leave() }
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let used = json["used_credits"] as? Int else {
+                NSLog("❌ Failed to fetch overage spend limit")
+                return
+            }
+            // used_credits is in cents (1471 = $14.71)
+            usedCredits = Double(used) / 100.0
+            NSLog("✅ Extra usage used: $\(usedCredits!)")
+        }.resume()
+
+        group.enter()
+        URLSession.shared.dataTask(with: request2) { data, response, error in
+            defer { group.leave() }
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let amount = json["amount"] as? Int else {
+                NSLog("❌ Failed to fetch prepaid credits")
+                return
+            }
+            // amount is in cents (4669 = $46.69)
+            remainingCredits = Double(amount) / 100.0
+            NSLog("✅ Extra usage remaining: $\(remainingCredits!)")
+        }.resume()
+
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self,
+                  let used = usedCredits,
+                  let remaining = remainingCredits else {
+                NSLog("❌ Could not compute extra usage")
+                return
+            }
+
+            let total = used + remaining
+            self.extraUsageUsed = used
+            self.extraUsageTotal = total
+            self.extraUsagePercentage = total > 0 ? used / total : 0.0
+            self.hasExtraUsage = true
+            NSLog("✅ Extra usage: $\(String(format: "%.2f", used)) / $\(String(format: "%.2f", total)) (\(Int(self.extraUsagePercentage * 100))%)")
         }
     }
 
@@ -1217,6 +1322,15 @@ struct UsageView: View {
 
     var calculatedHeight: CGFloat {
         var height: CGFloat = 310 // Base height for header, usage bars, buttons
+
+        // Add height for extra usage if showing for Claude
+        if usageManager.selectedService == .claude &&
+           usageManager.extraUsageEnabled &&
+           usageManager.hasExtraUsage &&
+           usageManager.hasFetchedData {
+            height += 52 // Height for extra usage bar
+        }
+
         if showingCookieInput { height += 260 }
         if showingCodexInput { height += 300 }
         if showingSettings { height += 280 }
@@ -1356,6 +1470,26 @@ struct UsageView: View {
                             }
                         }
                     }
+                }
+            }
+
+            // Extra Usage (overage/prepaid credits) - only for Claude
+            if usageManager.selectedService == .claude && usageManager.extraUsageEnabled && usageManager.hasExtraUsage && usageManager.hasFetchedData {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Extra Usage")
+                            .font(.subheadline)
+                        Spacer()
+                        Text("$\(String(format: "%.2f", usageManager.extraUsageUsed)) / $\(String(format: "%.2f", usageManager.extraUsageTotal))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    ColoredProgressBar(value: usageManager.extraUsagePercentage, tintColor: colorForPercentage(usageManager.extraUsagePercentage))
+
+                    Text("\(Int(usageManager.extraUsagePercentage * 100))% used")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
             }
@@ -1613,11 +1747,11 @@ struct UsageView: View {
 
             if showingSettings {
                 VStack(alignment: .leading, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("Menu Bar Display")
                             .font(.caption)
                             .fontWeight(.semibold)
-                        Picker("Show usage for:", selection: Binding(
+                        Picker("", selection: Binding(
                             get: { usageManager.displayedService },
                             set: { newValue in
                                 usageManager.displayedService = newValue
@@ -1630,16 +1764,18 @@ struct UsageView: View {
                             }
                         }
                         .pickerStyle(.radioGroup)
+                        .font(.caption)
+                        .labelsHidden()
                         Text("Choose which service's usage to display in the menu bar")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
 
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("Menu Bar Based On")
                             .font(.caption)
                             .fontWeight(.semibold)
-                        Picker("Base percentage on:", selection: Binding(
+                        Picker("", selection: Binding(
                             get: { usageManager.menuBarBasedOn },
                             set: { newValue in
                                 usageManager.menuBarBasedOn = newValue
@@ -1652,6 +1788,8 @@ struct UsageView: View {
                             }
                         }
                         .pickerStyle(.radioGroup)
+                        .font(.caption)
+                        .labelsHidden()
                         Text("Choose whether menu bar percentage/color is based on 5-hour or weekly limit")
                             .font(.caption2)
                             .foregroundColor(.secondary)
@@ -1675,6 +1813,28 @@ struct UsageView: View {
                         }
                     }
                     .toggleStyle(.checkbox)
+
+                    Toggle(isOn: Binding(
+                        get: { usageManager.extraUsageEnabled },
+                        set: { newValue in
+                            usageManager.extraUsageEnabled = newValue
+                            usageManager.saveSettings()
+                            if newValue {
+                                usageManager.fetchUsage()
+                            }
+                        }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Show Extra Usage (Claude)")
+                                .font(.caption)
+                            Text("Show overage/prepaid credit usage bar")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+
+                    Divider()
 
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle(isOn: Binding(
