@@ -43,8 +43,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Fetch initial data
         usageManager.fetchUsage()
 
-        // Set up timer to refresh every 5 minutes
-        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
+        // Set up timer to refresh every 90 seconds
+        Timer.scheduledTimer(withTimeInterval: 90, repeats: true) { _ in
             self.usageManager.fetchUsage()
         }
 
